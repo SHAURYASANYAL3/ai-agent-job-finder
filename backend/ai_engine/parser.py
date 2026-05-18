@@ -1,7 +1,14 @@
+import os
 import re
+import json
 import fitz  # PyMuPDF
 from typing import Dict, List, Any
+from dotenv import load_dotenv
+from openai import OpenAI
 
+load_dotenv()
+
+# Multi-industry skill taxonomy
 INDUSTRY_TAXONOMY = {
     "Software/IT": ["Python", "Java", "JavaScript", "React", "Node.js", "Docker", "AWS", "Machine Learning", "Software Engineer", "Frontend"],
     "Civil Engineering": ["AutoCAD", "STAAD Pro", "Concrete Design", "Revit", "Civil 3D", "Surveying", "Structural", "Construction"],
@@ -22,13 +29,62 @@ def extract_text_from_pdf(content: bytes) -> str:
         text += page.get_text()
     return text
 
-def parse_resume_content(content: bytes, filename: str) -> Dict[str, Any]:
-    text = ""
-    if filename and filename.endswith(".pdf"):
-        text = extract_text_from_pdf(content)
-    else:
-        text = content.decode('utf-8', errors='ignore')
+def parse_with_openai(text: str) -> Dict[str, Any]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or "sk-abcdef" in api_key:
+        raise ValueError("Valid OpenAI API key not present in environment variables.")
 
+    client = OpenAI(api_key=api_key)
+    
+    prompt = f"""
+    You are an expert AI Resume Parser. Parse the following resume text and return a strictly structured JSON object.
+    Do not add any markdown formatting, code block markers (like ```json), or conversational text. Return ONLY the raw JSON.
+
+    Resume Text:
+    \"\"\"{text}\"\"\"
+
+    Strict JSON Schema expected:
+    {{
+        "name": "Full Name of candidate",
+        "industry": "One of: Software/IT, Civil Engineering, Electrical, Mechanical, Healthcare, Finance, Logistics, Marketing, Sales",
+        "yoe": 3,  // integer representing years of experience
+        "skills": ["Skill1", "Skill2"],
+        "certifications": ["Cert1", "Cert2"],
+        "job_titles": ["Title1", "Title2"],
+        "projects": ["Project1", "Project2"],
+        "achievements": ["Achievement1", "Achievement2"],
+        "ats_score": 85,  // overall ATS compatibility score out of 100
+        "scores": {{
+            "skill_strength": 90,  // out of 100
+            "experience": 80,  // out of 100
+            "project_quality": 85,  // out of 100
+            "certification": 70  // out of 100
+        }},
+        "suggestions": [
+            "Actionable feedback 1",
+            "Actionable feedback 2"
+        ]
+    }}
+    """
+    
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are a precise resume parsing engine that returns pure JSON structure."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.1
+    )
+    
+    raw_content = response.choices[0].message.content.strip()
+    
+    # Simple regex block strip if model accidentally wrapped in markdown code blocks
+    if raw_content.startswith("```"):
+        raw_content = re.sub(r"^```json\s*|```$", "", raw_content, flags=re.MULTILINE).strip()
+        
+    return json.loads(raw_content)
+
+def parse_with_heuristics(text: str) -> Dict[str, Any]:
     text_lower = text.lower()
     lines = text.split('\n')
     
@@ -118,3 +174,18 @@ def parse_resume_content(content: bytes, filename: str) -> Dict[str, Any]:
         },
         "suggestions": suggestions
     }
+
+def parse_resume_content(content: bytes, filename: str) -> Dict[str, Any]:
+    text = ""
+    if filename and filename.endswith(".pdf"):
+        text = extract_text_from_pdf(content)
+    else:
+        text = content.decode('utf-8', errors='ignore')
+
+    # Try LLM Parser first
+    try:
+        print("Attempting premium LLM resume parsing...")
+        return parse_with_openai(text)
+    except Exception as e:
+        print(f"LLM Parsing skipped/failed: {str(e)}. Falling back to localized heuristic parser.")
+        return parse_with_heuristics(text)
